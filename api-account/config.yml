@@ -1,0 +1,9 @@
+httpPort: 80
+jwtConfig:
+  secret: "93c61a11-a4f6-42fc-a995-4f1c850822bb"
+  accessTokenExpireSecond: 300
+  refreshTokenExpireSecond: 900
+dbConfig:
+  dsn: root:password@tcp(127.0.0.1:3306)/account?charset=utf8mb4&parseTime=True&loc=Local
+  maxIdleConns: 3
+  maxOpenConns: 10

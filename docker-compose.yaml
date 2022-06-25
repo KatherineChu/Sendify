@@ -1,0 +1,224 @@
+version: '3'
+services:
+  reverse-proxy:
+    image: traefik:v2.3
+    restart: always
+    command:
+      - "--entryPoints.web.address=:80"
+      - "--api.insecure=true"
+      - "--providers.docker"
+      - "--providers.docker.exposedbydefault=false"
+      - --accesslog=true # output log to stdout
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+  api-account:
+    image: minghsu0107/sendify-api-account:main
+    restart: always
+    environment:
+      HTTP_PORT: "80"
+      DB_DSN: "ming:password@tcp(accountdb:3306)/account?charset=utf8mb4&parseTime=True&loc=Local"
+      JWT_ACCESS_TOKEN_EXPIRE_SECOND: "300"
+      JWT_REFRESH_TOKEN_EXPIRE_SECOND: "86400"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api-account.rule=PathPrefix(`/api/account`)"
+      - "traefik.http.routers.api-account.entrypoints=web"
+      - "traefik.http.routers.api-account.service=api-account"
+      - "traefik.http.services.api-account.loadbalancer.server.port=80"
+  api-chat:
+    image: minghsu0107/sendify-api-chat:main
+    restart: always
+    environment:
+      PORT: "3000"
+      REDIS_ENDPOINT: redis-node1:6380
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      STORE_API: http://api-store
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api-chat.rule=PathPrefix(`/api/chat`) || PathPrefix(`/socket.io`)"
+      - "traefik.http.routers.api-chat.entrypoints=web"
+      - "traefik.http.routers.api-chat.service=api-chat"
+      - "traefik.http.services.api-chat.loadbalancer.server.port=3000"
+      - "traefik.http.middlewares.sendify-auth.forwardauth.address=http://api-account/api/account/forwardauth"
+      - "traefik.http.middlewares.sendify-auth.forwardauth.authResponseHeaders=X-User-Id, X-Username"
+  api-object:
+    image: minghsu0107/sendify-api-object:main
+    restart: always
+    environment:
+      PORT: "5000"
+      ACCESS_KEY: testaccesskey
+      SECRET_KEY: testsecret
+      EXPIRE_DAYS: "10"
+      S3_HOST: http://minio:9000
+      S3_BUCKET: sendifybucket
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api-object.rule=PathPrefix(`/api/upload`)"
+      - "traefik.http.routers.api-object.entrypoints=web"
+      - "traefik.http.routers.api-object.service=api-object"
+      - "traefik.http.services.api-object.loadbalancer.server.port=5000"
+      - "traefik.http.middlewares.sendify-auth.forwardauth.address=http://api-account/api/account/forwardauth"
+      - "traefik.http.middlewares.sendify-auth.forwardauth.authResponseHeaders=X-User-Id, X-Username"
+  api-store:
+    image: minghsu0107/sendify-api-store:main
+    restart: always
+    environment:
+      HTTP_PORT: "80"
+      GIN_MODE: debug
+      CASSANDRA_HOST: cassandra
+      CASSANDRA_USER: cassandra
+      CASSANDRA_PASSWORD: cassandra
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api-store.rule=PathPrefix(`/api/channel`) || PathPrefix(`/api/channels`) || PathPrefix(`/api/messages`)"
+      - "traefik.http.routers.api-store.entrypoints=web"
+      - "traefik.http.routers.api-store.service=api-store"
+      - "traefik.http.services.api-store.loadbalancer.server.port=80"
+  web-client:
+    image: minghsu0107/sendify-web-client:main
+    restart: always
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.web-client.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.web-client.entrypoints=web"
+      - "traefik.http.routers.web-client.service=web-client"
+      - "traefik.http.services.web-client.loadbalancer.server.port=80"
+  accountdb:
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_USER: ming
+      MYSQL_PASSWORD: password
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: account
+    command:
+      - mysqld
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --lower_case_table_names=1
+      - --max_allowed_packet=128M
+      - --max-connections=10000 # default: 151
+    ports:
+      - 3306:3306
+    volumes:
+      - mysql_data_account:/var/lib/mysql
+  minio:
+    image: minio/minio:RELEASE.2021-03-17T02-33-02Z@sha256:d33b2e9559ee59acf7591cd83cb7238837158a316956e6140e6692a8e4e12fe9
+    restart: always
+    volumes:
+      - minio_data:/export
+    command: server /export
+    environment:
+      MINIO_ACCESS_KEY: testaccesskey
+      MINIO_SECRET_KEY: testsecret
+    ports:
+      - "9000:9000"
+  createbucket:
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc config host add myminio http://minio:9000 testaccesskey testsecret;
+      /usr/bin/mc mb myminio/sendifybucket;
+      /usr/bin/mc policy set public myminio/sendifybucket;
+      exit 0;
+      "
+  cassandra:
+    image: docker.io/bitnami/cassandra:3-debian-10
+    restart: always
+    ports:
+      - 7000:7000
+      - 9042:9042
+    volumes:
+      - cassandra_data:/bitnami
+      - ./api-store/scripts:/docker-entrypoint-initdb.d
+    environment:
+      - CASSANDRA_SEEDS=cassandra
+      - CASSANDRA_PASSWORD_SEEDER=yes
+      - CASSANDRA_USER=cassandra
+      - CASSANDRA_PASSWORD=cassandra
+  redis-node1:
+    build:
+      context: deployments/redis
+    ports:
+      - 6380:6380
+      - 16380:16380
+    restart: always
+    volumes:
+      - redis-node1-data:/data
+    entrypoint: [redis-server, /etc/redis/rediscluster.conf, --port,"6380", --cluster-announce-ip,"${REDIS_CLUSTER_IP}"]
+  redis-node2:
+    build:
+      context: deployments/redis
+    ports:
+      - 6381:6381
+      - 16381:16381
+    restart: always
+    volumes:
+      - redis-node2-data:/data
+    entrypoint: [redis-server, /etc/redis/rediscluster.conf,--port,"6381",--cluster-announce-ip,"${REDIS_CLUSTER_IP}"]
+  redis-node3:
+    build:
+      context: deployments/redis
+    ports:
+      - 6382:6382
+      - 16382:16382
+    restart: always
+    volumes:
+      - redis-node3-data:/data
+    entrypoint: [redis-server, /etc/redis/rediscluster.conf,--port,"6382",--cluster-announce-ip,"${REDIS_CLUSTER_IP}"]
+  redis-node4:
+    build:
+      context: deployments/redis
+    ports:
+      - 6383:6383
+      - 16383:16383
+    restart: always
+    volumes:
+      - redis-node4-data:/data
+    entrypoint: [redis-server, /etc/redis/rediscluster.conf,--port,"6383",--cluster-announce-ip,"${REDIS_CLUSTER_IP}"]
+  redis-node5:
+    build:
+      context: deployments/redis
+    ports:
+      - 6384:6384
+      - 16384:16384
+    restart: always
+    volumes:
+      - redis-node5-data:/data
+    entrypoint: [redis-server, /etc/redis/rediscluster.conf,--port,"6384",--cluster-announce-ip,"${REDIS_CLUSTER_IP}"]
+  redis-node6:
+    build:
+      context: deployments/redis
+    ports:
+      - 6385:6385
+      - 16385:16385
+    restart: always
+    volumes:
+      - redis-node6-data:/data
+    entrypoint: [redis-server, /etc/redis/rediscluster.conf,--port,"6385",--cluster-announce-ip,"${REDIS_CLUSTER_IP}"]
+  redis-cluster-creator:
+    image: redis:6.2.6
+    entrypoint: [/bin/sh,-c,'echo "yes" | redis-cli -a ${REDIS_PASSWORD} --cluster create ${REDIS_CLUSTER_IP}:6380 ${REDIS_CLUSTER_IP}:6381 ${REDIS_CLUSTER_IP}:6382 ${REDIS_CLUSTER_IP}:6383 ${REDIS_CLUSTER_IP}:6384 ${REDIS_CLUSTER_IP}:6385 --cluster-replicas 1']
+    depends_on:
+      - redis-node1
+      - redis-node2
+      - redis-node3
+      - redis-node4
+      - redis-node5
+      - redis-node6
+volumes:
+  mysql_data_account:
+  minio_data:
+  cassandra_data:
+  redis-node1-data:
+  redis-node2-data:
+  redis-node3-data:
+  redis-node4-data:
+  redis-node5-data:
+  redis-node6-data:
